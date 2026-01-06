@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
+# Copyright (c) 2022-2025, Fan Yang and Per Frivik, ETH Zurich.
 # All rights reserved.
 #
-# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-License-Identifier: MIT
 
-"""Play a trained navigation policy using RSL-RL.
-
-This script loads a trained policy and runs it in the environment.
+"""Play a trained navigation policy (PPO/MDPO) with automatic checkpoint loading.
 
 Usage:
-    # Play with B2W
-    ./isaaclab.sh -p source/isaaclab_nav_tasks/scripts/play.py \
-        --task Isaac-Navigation-Critic-RNN-Image-PPO-B2W-Play-v0 --num_envs 16
+    python scripts/play.py --task <task_name> [options]
 
-    # Play with checkpoint
-    ./isaaclab.sh -p source/isaaclab_nav_tasks/scripts/play.py \
-        --task Isaac-Navigation-Critic-RNN-Image-PPO-B2W-Play-v0 \
-        --checkpoint /path/to/model.pt
+Arguments:
+    --task                   Task name (required, typically *-Play-v0 variant)
+    --checkpoint             Path to model checkpoint (.pt file)
+    --use_last_checkpoint    Use latest checkpoint from logs (default behavior)
+    --num_envs              Number of parallel environments
+    --video                 Enable video recording
+    --video_length          Video length in steps (default: 200)
+
+Examples:
+    python scripts/play.py --task Isaac-Navigation-B2W-Play-v0
+    python scripts/play.py --task Isaac-Navigation-B2W-Play-v0 --checkpoint path/to/model.pt
+    python scripts/play.py --task Isaac-Navigation-B2W-Play-v0 --video --num_envs 16
+
+Note: Automatically finds latest checkpoint if --checkpoint not specified.
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ parser.add_argument("--num_envs", type=int, default=None, help="Number of enviro
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--use_last_checkpoint", action="store_true", help="Use last checkpoint from logs.")
+parser.add_argument("--export_jit", action="store_true", default=False, help="Export policy as JIT module.")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -56,7 +63,7 @@ from rsl_rl.runners import OnPolicyRunner
 
 # Import Isaac Lab extensions
 import isaaclab_tasks  # noqa: F401
-import isaaclab_nav_tasks  # noqa: F401
+import isaaclab_nav_task  # noqa: F401
 
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlVecEnvWrapper, export_policy_as_onnx
@@ -118,7 +125,7 @@ def load_checkpoint_with_fallback(runner: OnPolicyRunner, checkpoint_path: str, 
     # Load checkpoint to CPU first for compatibility
     loaded_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
-    # Load model state - handle both standard algorithms (PPO/SPO) and MDPO
+    # Load model state - handle both standard algorithms (PPO) and MDPO
     if runner.is_mdpo:
         # MDPO uses two actor-critics, load same state into both
         runner.alg.actor_critic_1.load_state_dict(loaded_dict["model_state_dict"], strict=True)
@@ -141,6 +148,32 @@ def load_checkpoint_with_fallback(runner: OnPolicyRunner, checkpoint_path: str, 
 
     runner.current_learning_iteration = loaded_dict["iter"]
     print(f"[INFO] Loaded checkpoint from iteration {loaded_dict['iter']}")
+
+
+def export_policy_jit(runner: OnPolicyRunner, checkpoint_path: str):
+    """Export policy as JIT module to an 'export' folder next to the checkpoint.
+
+    Args:
+        runner: RSL-RL runner instance with loaded policy
+        checkpoint_path: Path to the checkpoint file (used to determine export location)
+    """
+    # Determine export directory (create 'export' folder in the same directory as checkpoint)
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    export_dir = os.path.join(checkpoint_dir, "export")
+
+    # Get the actor-critic module
+    if runner.is_mdpo:
+        actor_critic = runner.alg.actor_critic_1
+    else:
+        actor_critic = runner.alg.actor_critic
+
+    # Get normalizer if using empirical normalization
+    normalizer = runner.obs_normalizer if runner.empirical_normalization else None
+
+    # Export using the module's export_jit method
+    print(f"[INFO] Exporting JIT policy to: {export_dir}")
+    actor_critic.export_jit(path=export_dir, filename="policy.pt", normalizer=normalizer)
+    print(f"[INFO] JIT export complete!")
 
 
 def main():
@@ -176,6 +209,10 @@ def main():
 
     # Load checkpoint with compatibility handling
     load_checkpoint_with_fallback(runner, resume_path)
+
+    # Export JIT if requested
+    if args_cli.export_jit:
+        export_policy_jit(runner, resume_path)
 
     # Obtain policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)

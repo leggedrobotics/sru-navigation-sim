@@ -61,12 +61,68 @@ The extension is fully self-contained with all necessary robot models, materials
 
 ## Installation
 
-First, install the extension in development mode:
+### Prerequisites
+
+- Isaac Lab v2.1.1 installed and configured
+- Isaac Sim 4.5.0
+- Python 3.10
+- PyTorch >= 2.5.1
+
+### Step 1: Clone or Place the Extension
+
+This extension should be placed in the `source/` directory of your IsaacLab installation:
 
 ```bash
+# Navigate to your IsaacLab installation
+cd /path/to/IsaacLab
+
+# If cloning this repository separately, place it in source/
+# Your directory structure should look like:
+# IsaacLab/
+# ├── source/
+# │   ├── isaaclab/
+# │   ├── isaaclab_assets/
+# │   └── isaaclab_nav_task/  <- This extension
+```
+
+### Step 2: Install the Extension
+
+Install the extension in development mode from the IsaacLab root directory:
+
+```bash
+# From IsaacLab root directory
+./isaaclab.sh -p -m pip install -e source/isaaclab_nav_task
+
+# Or navigate to the extension directory
 cd source/isaaclab_nav_task
+../../isaaclab.sh -p -m pip install -e .
+```
+
+### Step 3: Install RSL-RL (Required for Training)
+
+This extension requires the `rsl_rl` package for training. Install the custom version with MDPO/PPO algorithms:
+
+```bash
+# Clone and install custom rsl_rl (if not already installed)
+cd /path/to/your/workspace
+git clone https://github.com/leggedrobotics/rsl_rl.git
+cd rsl_rl
 pip install -e .
 ```
+
+### Verify Installation
+
+Test that the extension is properly installed:
+
+```bash
+# From IsaacLab root directory
+./isaaclab.sh -p -m pip show isaaclab_nav_task
+
+# List available tasks
+./isaaclab.sh -p source/isaaclab_nav_task/scripts/train.py --help
+```
+
+You should see the task IDs listed (e.g., `Isaac-Nav-MDPO-B2W-v0`, `Isaac-Nav-PPO-AoW-D-v0`, etc.).
 
 ## Available Tasks
 
@@ -265,292 +321,23 @@ All locomotion policies are pre-trained and loaded by the hierarchical action co
 - Hierarchical action space with SE2 velocity commands
 - Integration with pre-trained low-level locomotion policies
 
-### Terrain Generation (`terrains/`)
+### Terrain Generation and Goal Sampling (`terrains/`)
 
-The extension includes custom maze terrain generators built on Isaac Lab's terrain generation system.
+The extension includes custom maze terrain generators built on Isaac Lab's terrain generation system, providing diverse navigation environments with safe goal and spawn position sampling.
 
-#### Architecture Overview
+**Key Features:**
+- **Four terrain types**: Maze, non-maze/random, stairs, and pits
+- **Curriculum learning**: 180 terrains organized in 6 difficulty levels
+- **Safe position sampling**: Separate padding for goals (0.5m) and spawns (0.6m)
+- **Mesh optimization**: ~80-99% vertex reduction for large-scale training
+- **Explicit boolean masks**: Pre-computed valid positions for efficient sampling
 
-```
-Terrain Generation Flow:
-┌────────────────────────────────────────────────────────────────────┐
-│  1. HfMazeTerrainCfg                                               │
-│     └─► maze_terrain() generates:                                  │
-│         - heights: Height field for physics/rendering              │
-│         - valid_mask: Valid goal positions (GOAL_PADDING=5 cells)  │
-│         - spawn_mask: Valid spawn positions (SPAWN_PADDING=6 cells)│
-│         - platform_mask: Elevated platforms for curriculum         │
-│                                                                    │
-│  2. TerrainGenerator (patched)                                     │
-│     └─► Collects height field data from all sub-terrains           │
-│     └─► Concatenates into single tensors per attribute             │
-│                                                                    │
-│  3. TerrainImporter (patched)                                      │
-│     └─► Stores on self._height_field_* attributes                  │
-│                                                                    │
-│  4. RobotNavigationGoalCommand                                     │
-│     └─► Reads from env.scene.terrain._height_field_*               │
-│     └─► Creates PositionSampler with both masks                    │
-└────────────────────────────────────────────────────────────────────┘
-```
+**Terrain Configuration:**
+- Grid: 6 rows (difficulty) × 30 columns (variations) = 180 terrains
+- Size: 30m × 30m per terrain with 0.1m resolution (300×300 cells)
+- Proportions: 30% maze, 20% random, 30% stairs, 20% pits
 
-#### Key Files
-
-| File | Purpose |
-|------|---------|
-| `hf_terrains_maze.py` | Terrain generation with explicit valid_mask/spawn_mask |
-| `hf_terrains_maze_cfg.py` | Configuration dataclass with mask storage attributes |
-| `terrain_constants.py` | PADDING, HEIGHTS, THRESHOLDS constants |
-| `patches.py` | Monkey-patches for TerrainGenerator/TerrainImporter |
-| `maze_config.py` | MAZE_TERRAIN_CFG with sub-terrain configurations |
-
-#### Mesh Optimization (`patches.py`)
-
-The extension includes automatic mesh optimization that significantly reduces GPU memory usage when training with many environments. This is especially important for large-scale RL training (4096+ environments).
-
-**How it works:**
-- Uses hierarchical block-based approach (20x20 → 10x10 → 5x5 blocks)
-- Flat terrain regions are simplified to just 2 triangles instead of full mesh detail
-- Non-flat regions recursively subdivide until 5x5 blocks, then generate detailed mesh
-- Applied automatically via monkey-patching when the extension is imported
-
-**Memory Reduction:**
-| Terrain Type | Vertex Reduction |
-|--------------|------------------|
-| Flat terrain | ~99% |
-| Maze-like | ~89% |
-| Pits terrain | ~80% |
-| Mixed terrain | ~79% |
-
-This optimization is transparent - it produces visually identical terrains while dramatically reducing the mesh vertex count. The patches are applied before any terrain generation occurs, ensuring all height-field terrains benefit from the optimization.
-
-#### Terrain Data Flow
-
-The terrain system uses **explicit boolean masks** instead of height-based classification:
-
-```python
-# During terrain generation (hf_terrains_maze.py)
-terrain = TerrainData.create(width, height)
-
-# Mark obstacles as invalid
-terrain.set_obstacle(x_start, x_end, y_start, y_end, wall_height)
-
-# Apply padding and create masks
-terrain.apply_padding(PADDING.GOAL_PADDING)   # 5 cells = 0.5m for goals
-spawn_mask = terrain.create_spawn_mask(PADDING.SPAWN_PADDING)  # 6 cells = 0.6m for spawns
-
-# Store on config for patches to pick up
-cfg.height_field_visual = heights      # For Z-lookup
-cfg.height_field_valid_mask = valid_mask   # For goal sampling
-cfg.height_field_spawn_mask = spawn_mask   # For spawn sampling
-cfg.height_field_platform_mask = platform_mask  # For curriculum
-```
-
-#### Maze Terrain Types (`hf_terrains_maze.py`)
-
-Four terrain types are available via `HfMazeTerrainCfg`:
-
-1. **Maze** (`non_maze_terrain=False, stairs=False`)
-   - DFS-generated maze with configurable wall openings
-   - Random obstacle shapes (pillars, bars, crosses, blocks)
-   - Optional stairs integration (`add_stairs_to_maze=True`)
-
-2. **Non-Maze/Random** (`non_maze_terrain=True`)
-   - Random obstacle placement (~15-35% coverage based on difficulty)
-   - Good for testing navigation without maze structure
-
-3. **Stairs** (`stairs=True`)
-   - 3x3 stair/platform structures with 4 cardinal stairways
-   - Elevated platforms marked for curriculum learning
-   - Tests robot climbing capabilities
-
-4. **Pits** (`dynamic_obstacles=True`)
-   - Pit rows with bridge crossings
-   - Mix of pit (60%) and wall (40%) obstacles
-   - Tests navigation over negative obstacles
-
-#### Safety Padding
-
-Two padding levels ensure safe robot placement:
-
-| Padding Type | Cells | Meters | Purpose |
-|--------------|-------|--------|---------|
-| `GOAL_PADDING` | 5 | 0.5m | Goal positions (robot just needs to reach) |
-| `SPAWN_PADDING` | 6 | 0.6m | Spawn positions (accounts for robot body) |
-
-The larger spawn padding accounts for:
-- Robot body dimensions (~0.5m × 0.3m for quadrupeds)
-- Random yaw orientation (diagonal ~0.58m requires ~0.3m clearance)
-- Platform edge safety (prevent falling when spawning near stairs)
-- Controller startup behavior
-
-#### Terrain Configuration (`maze_config.py`)
-
-```python
-MAZE_TERRAIN_CFG = TerrainGeneratorCfg(
-    size=(30.0, 30.0),           # 30m × 30m per terrain
-    num_rows=6,                   # 6 difficulty levels
-    num_cols=30,                  # 30 terrain types
-    horizontal_scale=0.1,         # 0.1m per height field cell
-    vertical_scale=0.005,         # Height scaling factor
-    curriculum=False,             # Random terrain assignment
-    sub_terrains={
-        "maze": HfMazeTerrainCfg(proportion=0.3, ...),
-        "non_maze": HfMazeTerrainCfg(proportion=0.2, non_maze_terrain=True, ...),
-        "stairs": HfMazeTerrainCfg(proportion=0.3, stairs=True, ...),
-        "pits": HfMazeTerrainCfg(proportion=0.2, dynamic_obstacles=True, ...),
-    },
-)
-```
-
-Key parameters:
-- **grid_size**: Maze grid cells (default: 15×15)
-- **cell_size**: Size per maze cell (default: 2.0m)
-- **wall_height**: Obstacle height (default: 1.5m)
-- **open_probability**: Controls maze complexity (0.9 = more open)
-- **random_wall_ratio**: Mix of random vs standard walls
-
-#### Curriculum Learning
-
-Terrains are organized in a grid with difficulty varying by row:
-- **Rows** (`terrain_levels`): Difficulty levels (0.0 to 1.0)
-- **Columns** (`terrain_types`): Different terrain types
-
-```
-Difficulty
-  1.0  | [Hard Maze] [Random Obs] [Tall Stairs] [Deep Pits] ...
-  0.8  | [Med Maze]  [Med Obs]    [Med Stairs]  [Med Pits]  ...
-  0.5  | [Easy Maze] [Few Obs]    [Low Stairs]  [Shallow]   ...
-  0.0  | [Flat]      [Flat]       [Flat]        [Flat]      ...
-       └──────────────────────────────────────────────────────
-           maze        non_maze     stairs        pits
-```
-
-### Goal Commands (`mdp/navigation/goal_commands.py`)
-
-The goal command generator (`RobotNavigationGoalCommand`) handles sampling valid goal and spawn positions from maze terrains using pre-computed boolean masks.
-
-#### Architecture
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│  RobotNavigationGoalCommand                                        │
-│  └─► _initialize_position_sampling() (once)                        │
-│      └─► Creates PositionSampler with:                             │
-│          - heights: Z-lookup for terrain height                    │
-│          - valid_mask: Goal positions (0.5m padding)               │
-│          - spawn_mask: Spawn positions (0.6m padding)              │
-│          - platform_mask: Curriculum learning targets              │
-│                                                                    │
-│  └─► _resample_command(env_ids) (each reset)                       │
-│      └─► sample(): Goal from valid_mask                            │
-│      └─► sample_spawn(): Spawn from spawn_mask                     │
-│      └─► Convert local → world coordinates                         │
-└────────────────────────────────────────────────────────────────────┘
-```
-
-#### Key Features
-
-- **Pre-computed masks**: `valid_mask` and `spawn_mask` generated during terrain creation
-- **Separate padding**: Goals (0.3m) vs spawns (0.8m) for robot body clearance
-- **Platform repetition**: Stair platforms repeated in sampling for curriculum learning
-- **Efficient lookup**: Pre-built position tables enable O(1) random sampling
-- **Coordinate conversion**: Handles mesh border offset and centering transform
-
-#### Coordinate System
-
-The terrain mesh uses a coordinate system with:
-- **Border pixels**: 1 extra pixel on each edge from `@height_field_to_mesh` decorator
-- **Centering transform**: Mesh is centered at origin by `-terrain_size/2`
-
-```python
-# Converting valid_mask index to local coordinates:
-local_x = (x_idx + border_pixels) * horizontal_scale - terrain_size/2
-local_y = (y_idx + border_pixels) * horizontal_scale - terrain_size/2
-
-# Example: terrain_size=30m, horizontal_scale=0.1m
-# valid_mask[0, 0] → local position: (0.1 - 15, 0.1 - 15) = (-14.9, -14.9)
-```
-
-#### Terrain Index Mapping
-
-The terrain index formula depends on the generation mode:
-
-| Mode | Formula | Description |
-|------|---------|-------------|
-| `curriculum=True` | `level + type * num_rows` | Column-major (iterate rows first) |
-| `curriculum=False` | `level * num_cols + type` | Row-major (iterate cols first) |
-
-```python
-# In goal_commands.py:
-def _get_terrain_indices(self, env_ids):
-    terrain = self.env.scene.terrain
-    levels = terrain.terrain_levels[env_ids]  # row
-    types = terrain.terrain_types[env_ids]    # col
-
-    if terrain_cfg.curriculum:
-        return levels + types * num_rows  # column-major
-    else:
-        return levels * num_cols + types  # row-major
-```
-
-#### Position Sampling
-
-**PositionSampler** provides two sampling methods:
-
-```python
-class PositionSampler:
-    def sample(terrain_indices) -> (x, y, z):
-        """Sample GOAL positions from valid_mask.
-        Uses platform repetition for curriculum learning."""
-
-    def sample_spawn(terrain_indices) -> (x, y, z):
-        """Sample SPAWN positions from spawn_mask.
-        Larger padding for robot body with random orientation."""
-```
-
-**Sampling flow during episode reset:**
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  _resample_command(env_ids)                                     │
-├─────────────────────────────────────────────────────────────────┤
-│  1. Get terrain indices for each environment                    │
-│     - terrain_levels[env_ids] → row (difficulty)                │
-│     - terrain_types[env_ids] → col (terrain type)               │
-│     - Apply curriculum/random index formula                     │
-│                                                                  │
-│  2. Sample goal position (from valid_mask)                      │
-│     - Random sample from pre-computed goal position table       │
-│     - Platform positions repeated for curriculum weighting      │
-│                                                                  │
-│  3. Sample spawn position (from spawn_mask)                     │
-│     - Random sample from pre-computed spawn position table      │
-│     - Larger padding ensures robot body clearance               │
-│                                                                  │
-│  4. Convert to world coordinates                                │
-│     - Add terrain_origins[level, type] offset                   │
-│     - Goal: Add random height offset (0.2-0.8m) for marker      │
-│     - Spawn: Add robot base height (0.5m) for standing          │
-│                                                                  │
-│  5. Update environment origins                                  │
-│     - env.scene.terrain.env_origins[env_ids] = spawn position   │
-│     - Robot will be reset to this position                      │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-#### Robot Spawn Height
-
-The spawn height offset accounts for the robot's standing height:
-
-```python
-# In _resample_command():
-robot_base_height = 0.5  # Quadruped standing height
-
-terrain.env_origins[env_ids, 2] = spawn_z + robot_base_height
-```
-
-This ensures the robot spawns at proper standing height above the terrain surface, rather than with its base at ground level.
+For detailed documentation on terrain generation, goal/spawn sampling, coordinate systems, and implementation details, see [TERRAIN_AND_GOALS.md](TERRAIN_AND_GOALS.md).
 
 ### Depth Processing (`mdp/depth_utils/`)
 - **DepthNoise**: Simulates realistic stereo camera noise using disparity-based filtering

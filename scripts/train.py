@@ -1,33 +1,29 @@
 #!/usr/bin/env python3
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers.
+# Copyright (c) 2022-2025, Fan Yang and Per Frivik, ETH Zurich.
 # All rights reserved.
 #
-# SPDX-License-Identifier: BSD-3-Clause
+# SPDX-License-Identifier: MIT
 
-"""Train a navigation policy using RSL-RL.
-
-This script provides a convenient wrapper for training navigation policies
-with the standalone navigation extension.
+"""Train a navigation policy using RSL-RL (PPO/MDPO algorithms).
 
 Usage:
-    # Train with PPO algorithm on B2W
-    ./isaaclab.sh -p source/isaaclab_nav_tasks/scripts/train.py \
-        --task Isaac-Navigation-Critic-RNN-Image-PPO-B2W-v0 --num_envs 4096
+    python scripts/train.py --task <task_name> --num_envs <num> [options]
 
-    # Train with PPO algorithm on AoW-D
-    ./isaaclab.sh -p source/isaaclab_nav_tasks/scripts/train.py \
-        --task Isaac-Navigation-Critic-RNN-Image-PPO-AoW-D-v0 --num_envs 4096
+Arguments:
+    --task               Task name (required)
+    --num_envs           Number of parallel environments
+    --seed               Random seed
+    --max_iterations     Training iterations
+    --run_name           Custom run name for logging
+    --video              Enable video recording
+    --video_length       Video length in steps (default: 200)
+    --video_interval     Recording interval in steps (default: 2000)
 
-    # Train with SPO algorithm on B2W
-    ./isaaclab.sh -p source/isaaclab_nav_tasks/scripts/train.py \
-        --task Isaac-Navigation-Critic-RNN-Image-SPO-B2W-v0 --num_envs 4096
+Examples:
+    python scripts/train.py --task Isaac-Navigation-B2W-v0 --num_envs 2048
+    python scripts/train.py --task Isaac-Navigation-B2W-v0 --video --seed 42
 
-Available Tasks:
-    - Isaac-Navigation-Critic-RNN-Image-SPO-B2W-v0
-    - Isaac-Navigation-Critic-RNN-Image-PPO-B2W-v0
-    - Isaac-Navigation-Critic-RNN-Image-SPO-AoW-D-v0
-    - Isaac-Navigation-Critic-RNN-Image-PPO-AoW-D-v0
-    (Plus -Play-v0 and -Dev-v0 variants for each)
+Logs saved to: logs/rsl_rl/<experiment_name>/<timestamp>/
 """
 
 from __future__ import annotations
@@ -71,7 +67,7 @@ from rsl_rl.runners import OnPolicyRunner
 
 # Import Isaac Lab extensions
 import isaaclab_tasks  # noqa: F401
-import isaaclab_nav_tasks  # noqa: F401
+import isaaclab_nav_task  # noqa: F401
 
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.utils.dict import print_dict

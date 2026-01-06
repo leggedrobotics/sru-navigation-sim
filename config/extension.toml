@@ -4,12 +4,12 @@
 version = "0.1.0"
 
 # Description
-title = "Isaac Lab Navigation Tasks"
-description = "Extension containing navigation tasks for robot learning with visual perception."
+title = "IsaacLab Navigation Extension - SRU Project"
+description = "IsaacLab task extension for SRU visual navigation with hierarchical control, maze terrain generation, and depth-based RL."
 readme = "docs/README.md"
-repository = "https://github.com/isaac-sim/IsaacLab"
+repository = "https://github.com/michaelfyang/sru-pytorch-spatial-learning"
 category = "robotics"
-keywords = ["robotics", "rl", "navigation", "visual", "learning"]
+keywords = ["robotics", "rl", "navigation", "visual", "learning", "sru", "depth", "hierarchical", "maze", "isaaclab"]
 
 [dependencies]
 "isaaclab" = {}
@@ -19,4 +19,4 @@ keywords = ["robotics", "rl", "navigation", "visual", "learning"]
 reloadable = false
 
 [[python.module]]
-name = "isaaclab_nav_tasks"
+name = "isaaclab_nav_task"

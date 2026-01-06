@@ -1,4 +1,6 @@
-isaaclab_nav_tasks.egg-info/
+*.egg-info/
 __pycache__/
 *.pyc
 .pytest_cache/
+.vscode/
+.DS_Store
