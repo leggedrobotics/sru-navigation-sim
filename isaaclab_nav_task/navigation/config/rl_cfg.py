@@ -47,10 +47,12 @@ class RslRlPpoActorCriticCfg:
     """The dropout rate for the first layer of the actor and critic networks."""
 
     # Visual inputs
-    num_cameras: int = 2
+    num_cameras: int = 1
     """Number of depth cameras encoded into the observation (1 or 2)."""
-    image_input_dims: tuple[int, int, int] = (64, 4, 7)
+    
+    image_input_dims: tuple[int, int, int] = (64, 5, 8)
     """Encoded depth feature shape as (C, H, W)."""
+    
     height_input_dims: tuple[int, int, int] = (64, 7, 7)
     """Encoded height scan feature shape as (C, H, W). Default is (64, 7, 7) for 64*7*7=3136 features."""
 

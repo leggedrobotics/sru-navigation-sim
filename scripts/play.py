@@ -41,6 +41,7 @@ parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--use_last_checkpoint", action="store_true", help="Use last checkpoint from logs.")
 parser.add_argument("--export_jit", action="store_true", default=False, help="Export policy as JIT module.")
+parser.add_argument("--export_onnx", action="store_true", default=False, help="Export policy as ONNX model.")
 
 # Append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -176,6 +177,39 @@ def export_policy_jit(runner: OnPolicyRunner, checkpoint_path: str):
     print(f"[INFO] JIT export complete!")
 
 
+def export_policy_onnx(runner: OnPolicyRunner, checkpoint_path: str):
+    """Export policy as ONNX model to an 'export' folder next to the checkpoint.
+
+    Args:
+        runner: RSL-RL runner instance with loaded policy
+        checkpoint_path: Path to the checkpoint file (used to determine export location)
+    """
+    # Determine export directory (create 'export' folder in the same directory as checkpoint)
+    checkpoint_dir = os.path.dirname(checkpoint_path)
+    export_dir = os.path.join(checkpoint_dir, "export")
+
+    # Get the actor-critic module
+    if runner.is_mdpo:
+        actor_critic = runner.alg.actor_critic_1
+    else:
+        actor_critic = runner.alg.actor_critic
+
+    # Get normalizer if using empirical normalization
+    normalizer = runner.obs_normalizer if runner.empirical_normalization else None
+
+    # Check if the module has export_onnx method
+    if not hasattr(actor_critic, "export_onnx"):
+        raise NotImplementedError(
+            f"ONNX export not implemented for {type(actor_critic).__name__}. "
+            "Please add an export_onnx method to this module."
+        )
+
+    # Export using the module's export_onnx method
+    print(f"[INFO] Exporting ONNX policy to: {export_dir}")
+    actor_critic.export_onnx(path=export_dir, filename="policy.onnx", normalizer=normalizer)
+    print(f"[INFO] ONNX export complete!")
+
+
 def main():
     """Play navigation policy with RSL-RL."""
     # Parse command-line arguments
@@ -213,6 +247,10 @@ def main():
     # Export JIT if requested
     if args_cli.export_jit:
         export_policy_jit(runner, resume_path)
+
+    # Export ONNX if requested
+    if args_cli.export_onnx:
+        export_policy_onnx(runner, resume_path)
 
     # Obtain policy for inference
     policy = runner.get_inference_policy(device=env.unwrapped.device)
