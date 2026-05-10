@@ -235,8 +235,6 @@ class PerceptiveNavigationSE2Action(ActionTerm):
         self.low_level_position_action_term.process_actions(self._low_level_position_actions)
         self.low_level_velocity_action_term.process_actions(self._low_level_velocity_actions)
 
-        self._counter = 0
-
     """
     Helper functions
     """
