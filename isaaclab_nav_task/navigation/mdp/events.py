@@ -160,6 +160,18 @@ def reset_and_randomize_delay_buffer(
     env.delay_manager.randomize_lags(env_ids)
 
 
+def reset_low_pass_filter(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    action_term: str,
+):
+    """Reset low-pass filter state for a navigation action term."""
+    action_term_obj: PerceptiveNavigationSE2Action = env.action_manager._terms[action_term]
+
+    if hasattr(action_term_obj, "reset_low_pass_filter"):
+        action_term_obj.reset_low_pass_filter(env_ids)
+
+
 def randomize_low_pass_filter_alpha(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,

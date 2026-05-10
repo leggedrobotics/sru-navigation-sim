@@ -213,12 +213,29 @@ class PerceptiveNavigationSE2Action(ActionTerm):
         self._counter += 1
 
     def reset_low_pass_filter(self, env_ids: torch.Tensor):
-        """Reset low-pass filter state for specified environments.
+        """Reset controller state for specified environments.
 
         Args:
             env_ids: Environment indices to reset.
         """
+        if env_ids is None:
+            env_ids = slice(None)
+
+        self._raw_navigation_velocity_actions[env_ids] = 0.0
+        self._processed_navigation_velocity_actions[env_ids] = 0.0
         self._prev_filtered_velocity_commands[env_ids] = 0.0
+        self._low_level_position_actions[env_ids] = 0.0
+        self._low_level_velocity_actions[env_ids] = 0.0
+        self._prev_low_level_position_actions[env_ids] = 0.0
+        self._prev_low_level_velocity_actions[env_ids] = 0.0
+
+        # Reset nested action terms. It is okay to process all envs because
+        # non-reset environments still have their previous low-level action
+        # rows unchanged.
+        self.low_level_position_action_term.process_actions(self._low_level_position_actions)
+        self.low_level_velocity_action_term.process_actions(self._low_level_velocity_actions)
+
+        self._counter = 0
 
     """
     Helper functions

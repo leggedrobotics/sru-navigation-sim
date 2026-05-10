@@ -304,17 +304,10 @@ class SuccessRateTracker:
         self.write_index = torch.zeros(num_envs, dtype=torch.long, device=device)
 
     def record_result(self, success: torch.Tensor, env_ids: torch.Tensor):
+        """Record outcomes for `env_ids`. `success` is 1-D and matches env_ids."""
         indices = self.write_index[env_ids] % self.buffer_size
-        self.buffer[env_ids, indices] = success[env_ids].float()
+        self.buffer[env_ids, indices] = success.float()
         self.write_index[env_ids] += 1
-
-    def add(self, results: torch.Tensor, env_ids: torch.Tensor):
-        """Legacy alias."""
-        self.record_result(results, env_ids)
-
-    def clear(self, env_ids: torch.Tensor):
-        self.buffer[env_ids] = -1.0
-        self.write_index[env_ids] = 0
 
     def get_success_rate(self) -> torch.Tensor:
         filled_count = (self.buffer >= 0).sum(dim=1).clamp(min=1)
@@ -386,7 +379,6 @@ class RobotNavigationGoalCommand(CommandTerm):
 
         self.goal_reach_count = torch.zeros(self.num_envs, device=self.device)
         self.success_tracker = SuccessRateTracker(self.num_envs, self.device, buffer_size=10)
-        self.success_rate_buffer = torch.full((self.num_envs, 10), -1.0, device=self.device)
 
     def _init_metrics(self):
         """Initialize performance metrics."""
@@ -621,29 +613,41 @@ class RobotNavigationGoalCommand(CommandTerm):
 
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
         """Reset command generator and compute episode metrics."""
-        metrics_obs = self.env.observation_manager.compute_group(group_name="metrics")
-        success = metrics_obs["in_goal"][env_ids].squeeze(-1)
-        failed = ~success
+        if env_ids is None:
+            env_ids_tensor = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+            env_ids_index = slice(None)
+        elif isinstance(env_ids, torch.Tensor):
+            env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
+            env_ids_index = env_ids
+        else:
+            env_ids_tensor = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+            env_ids_index = env_ids
 
-        # Update legacy success rate buffer
-        self.success_rate_buffer[env_ids] = torch.roll(
-            self.success_rate_buffer[env_ids], 1, dims=1
-        )
-        rate = success.float() - failed.float()
-        rate[rate == 0] = -1
-        self.success_rate_buffer[env_ids, 0] = rate
+        # Filter to envs that actually ran an episode; on the very first reset
+        # episode_length_buf is 0 and there is no outcome to record.
+        completed_mask = self.env.episode_length_buf[env_ids_tensor] > 0
+        completed_env_ids = env_ids_tensor[completed_mask]
+
+        if completed_env_ids.numel() > 0:
+            # Record the episode outcome once, at reset time. The episode
+            # counts as successful if the robot reached the goal threshold at
+            # any point before reset. time_at_goal is cleared later by _resample().
+            success = (self.time_at_goal[completed_env_ids] > 0.0).float()
+            self.success_tracker.record_result(success, completed_env_ids)
+
+        # Refresh rolling aggregates so reset extras include the episode that
+        # just terminated, not only the previous buffer contents.
+        self._update_metrics()
 
         # Reset command state
-        if env_ids is None:
-            env_ids = slice(None)
-        self.command_counter[env_ids] = 0
-        self._resample(env_ids)
+        self.command_counter[env_ids_index] = 0
+        self._resample(env_ids_index)
 
         # Return mean metrics
         extras = {}
         for name, value in self.metrics.items():
-            extras[name] = torch.mean(value[env_ids]).item()
-            value[env_ids] = 0.0
+            extras[name] = torch.mean(value[env_ids_index]).item()
+            value[env_ids_index] = 0.0
 
         return extras
 
@@ -779,7 +783,6 @@ RobotNavigationGoalCommand.time_at_goal_in_steps = property(lambda self: self.st
 RobotNavigationGoalCommand.required_time_at_goal_in_steps = property(
     lambda self: self.required_steps_at_goal
 )
-RobotNavigationGoalCommand.goal_reached_buffer = property(lambda self: self.success_tracker)
 RobotNavigationGoalCommand.goal_reached_counter = property(lambda self: self.goal_reach_count)
 RobotNavigationGoalCommand.distance_traveled = property(lambda self: self.total_distance_traveled)
 RobotNavigationGoalCommand.previous_pos_3d = property(lambda self: self.previous_position)
