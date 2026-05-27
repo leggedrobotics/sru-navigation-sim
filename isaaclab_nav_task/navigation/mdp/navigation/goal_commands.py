@@ -705,6 +705,10 @@ class RobotNavigationGoalCommand(CommandTerm):
 
         direction_to_goal = position_error_2d / torch.clamp(torch.norm(position_error_2d, dim=1, keepdim=True), min=1e-6)
         self.metrics["velocity_toward_goal"] = (velocity_2d * direction_to_goal).sum(dim=1)
+        self._update_tracker_metrics()
+
+    def _update_tracker_metrics(self):
+        """Refresh metrics backed by rolling episode trackers."""
         self.metrics["success_rate"] = self.success_tracker.get_success_rate()
         if self.cfg.track_spl:
             self.metrics["spl"] = self.spl_tracker.get_mean()
@@ -803,9 +807,16 @@ class RobotNavigationGoalCommand(CommandTerm):
             if self.cfg.track_turn_efficiency:
                 self._record_episode_turn_efficiency(completed_env_ids, success)
 
-        # Refresh rolling aggregates so reset extras include the episode that
-        # just terminated, not only the previous buffer contents.
-        self._update_metrics()
+        # Refresh tracker-backed metrics so reset extras include the
+        # episode that just terminated: success_tracker.record_result()
+        # above writes this episode's outcome AFTER the last compute()
+        # call, so without re-reading here the logged success_rate would
+        # lag by one episode.
+        # Do not call _update_metrics() - it also recomputes velocity from
+        # root_state_w, but reset runs after Isaac Lab has already reset
+        # scene state for these envs, so the read would overwrite the
+        # meaningful last in-episode velocity with reset-state values.
+        self._update_tracker_metrics()
 
         # Reset command state
         self.command_counter[env_ids_index] = 0
