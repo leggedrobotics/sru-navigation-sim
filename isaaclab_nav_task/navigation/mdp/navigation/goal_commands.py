@@ -707,7 +707,7 @@ class RobotNavigationGoalCommand(CommandTerm):
         self.metrics["velocity_toward_goal"] = (velocity_2d * direction_to_goal).sum(dim=1)
         self.metrics["success_rate"] = self.success_tracker.get_success_rate()
         if self.cfg.track_spl:
-            self.metrics["spl"] = self.spl_tracker.get_mean_spl()
+            self.metrics["spl"] = self.spl_tracker.get_mean()
         if self.cfg.track_sct:
             for name, tracker in self.sct_trackers.items():
                 self.metrics[name] = tracker.get_mean()

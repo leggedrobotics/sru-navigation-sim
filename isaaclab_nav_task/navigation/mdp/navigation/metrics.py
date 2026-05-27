@@ -29,7 +29,3 @@ class RollingMetricTracker:
         count = valid.sum(dim=1).clamp(min=1)
         total = torch.where(valid, self.buffer, torch.zeros_like(self.buffer)).sum(dim=1)
         return total / count.float()
-
-    def get_mean_spl(self) -> torch.Tensor:
-        """Compatibility alias used by existing evaluation scripts."""
-        return self.get_mean()
