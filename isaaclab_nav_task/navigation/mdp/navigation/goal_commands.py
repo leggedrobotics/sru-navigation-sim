@@ -38,6 +38,8 @@ from isaaclab.utils.math import subtract_frame_transforms, transform_points, yaw
 
 from isaaclab_nav_task.navigation.mdp.math_utils import vec_to_quat
 from isaaclab_nav_task.terrains.terrain_constants import VERTICAL_SCALE
+from .geodesic import GeodesicReferenceComputer
+from .metrics import RollingMetricTracker
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -304,17 +306,10 @@ class SuccessRateTracker:
         self.write_index = torch.zeros(num_envs, dtype=torch.long, device=device)
 
     def record_result(self, success: torch.Tensor, env_ids: torch.Tensor):
+        """Record outcomes for `env_ids`. `success` is 1-D and matches env_ids."""
         indices = self.write_index[env_ids] % self.buffer_size
-        self.buffer[env_ids, indices] = success[env_ids].float()
+        self.buffer[env_ids, indices] = success.float()
         self.write_index[env_ids] += 1
-
-    def add(self, results: torch.Tensor, env_ids: torch.Tensor):
-        """Legacy alias."""
-        self.record_result(results, env_ids)
-
-    def clear(self, env_ids: torch.Tensor):
-        self.buffer[env_ids] = -1.0
-        self.write_index[env_ids] = 0
 
     def get_success_rate(self) -> torch.Tensor:
         filled_count = (self.buffer >= 0).sum(dim=1).clamp(min=1)
@@ -378,21 +373,54 @@ class RobotNavigationGoalCommand(CommandTerm):
         self.required_steps_at_goal = 4.0 / self.env.step_dt
 
         self.initial_distance_to_goal = torch.zeros(self.num_envs, device=self.device)
+        if self._track_geodesic_metrics():
+            self.initial_geodesic_distance_to_goal = torch.zeros(self.num_envs, device=self.device)
+            self.reference_turn_cost_to_goal = torch.zeros(self.num_envs, device=self.device)
         self.distance_to_goal = torch.zeros(self.num_envs, device=self.device)
         self.closest_distance_to_goal = torch.zeros(self.num_envs, device=self.device)
 
         self.total_distance_traveled = torch.zeros(self.num_envs, device=self.device)
         self.previous_position = torch.zeros(self.num_envs, 3, device=self.device)
+        self.total_abs_yaw_change = torch.zeros(self.num_envs, device=self.device)
+        self.previous_yaw = torch.zeros(self.num_envs, device=self.device)
+
+        # Snapshots of total_distance_traveled and total_abs_yaw_change at the
+        # moment first_goal_reach_time is set. SPL, SCT and turn_efficiency read
+        # these instead of the live accumulators so the metrics reflect the
+        # path/turning to reach the goal, not subsequent motion during the
+        # sustained-presence wait before at_goal_navigation terminates.
+        self.path_at_first_reach = torch.full((self.num_envs,), float("nan"), device=self.device)
+        self.first_goal_reach_time = torch.full((self.num_envs,), float("nan"), device=self.device)
+        self.yaw_at_first_reach = torch.full((self.num_envs,), float("nan"), device=self.device)
 
         self.goal_reach_count = torch.zeros(self.num_envs, device=self.device)
         self.success_tracker = SuccessRateTracker(self.num_envs, self.device, buffer_size=10)
-        self.success_rate_buffer = torch.full((self.num_envs, 10), -1.0, device=self.device)
+        if self.cfg.track_spl:
+            self.spl_tracker = RollingMetricTracker(self.num_envs, self.device, buffer_size=10)
+        if self.cfg.track_sct:
+            self.sct_trackers = {
+                self._sct_metric_name(v_ref): RollingMetricTracker(self.num_envs, self.device, buffer_size=10)
+                for v_ref in self.cfg.sct_reference_speeds
+            }
+            self.time_to_goal_tracker = RollingMetricTracker(self.num_envs, self.device, buffer_size=10)
+        if self.cfg.track_turn_efficiency:
+            self.turn_efficiency_tracker = RollingMetricTracker(self.num_envs, self.device, buffer_size=10)
+            self.cumulative_yaw_tracker = RollingMetricTracker(self.num_envs, self.device, buffer_size=10)
 
     def _init_metrics(self):
         """Initialize performance metrics."""
         self.metrics["velocity_toward_goal"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["velocity_magnitude"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["success_rate"] = torch.zeros(self.num_envs, device=self.device)
+        if self.cfg.track_spl:
+            self.metrics["spl"] = torch.zeros(self.num_envs, device=self.device)
+        if self.cfg.track_sct:
+            for name in self.sct_trackers:
+                self.metrics[name] = torch.zeros(self.num_envs, device=self.device)
+            self.metrics["time_to_goal"] = torch.zeros(self.num_envs, device=self.device)
+        if self.cfg.track_turn_efficiency:
+            self.metrics["turn_efficiency"] = torch.zeros(self.num_envs, device=self.device)
+            self.metrics["cumulative_yaw"] = torch.zeros(self.num_envs, device=self.device)
 
     # =========================================================================
     # Command Interface
@@ -400,6 +428,14 @@ class RobotNavigationGoalCommand(CommandTerm):
 
     def __str__(self) -> str:
         return f"NavigationGoalCommand:\n\tCommand dimension: {tuple(self.command.shape[1:])}\n"
+
+    def _track_geodesic_metrics(self) -> bool:
+        """Whether any enabled metric needs A* spawn-to-goal reference data."""
+        return bool(self.cfg.track_spl or self.cfg.track_sct or self.cfg.track_turn_efficiency)
+
+    @staticmethod
+    def _sct_metric_name(v_ref: float) -> str:
+        return f"sct_vref_{str(float(v_ref)).replace('.', '_').replace('-', 'm')}"
 
     @property
     def command(self) -> torch.Tensor:
@@ -467,6 +503,17 @@ class RobotNavigationGoalCommand(CommandTerm):
             spawn_mask=spawn_mask,
             border_width=sub_terrain_border_width,
         )
+
+        if self._track_geodesic_metrics():
+            # Cache the goal-side valid_mask on CPU as numpy bool for A* lookups.
+            # Geodesic SPL uses the goal mask (not spawn mask) so the planned path
+            # represents the true shortest *navigable* route to the goal cell.
+            self._geodesic_reference = GeodesicReferenceComputer(
+                valid_mask=valid_mask.detach().to("cpu").numpy().astype(bool),
+                cell_size=horizontal_scale,
+                border_pixels=self._position_sampler.border_pixels,
+                mesh_center=self._position_sampler.mesh_center,
+            )
 
         self._sampling_initialized = True
 
@@ -552,12 +599,34 @@ class RobotNavigationGoalCommand(CommandTerm):
         )
         self.closest_distance_to_goal[env_ids] = self.initial_distance_to_goal[env_ids]
 
+        if self._track_geodesic_metrics():
+            start_x = self.robot.data.root_pos_w[env_ids, 0] - terrain_origins[:, 0]
+            start_y = self.robot.data.root_pos_w[env_ids, 1] - terrain_origins[:, 1]
+            geodesic, turn_cost = self._geodesic_reference.compute(
+                env_ids_tensor,
+                terrain_indices,
+                start_x,
+                start_y,
+                goal_x,
+                goal_y,
+                self.initial_distance_to_goal,
+            )
+            self.initial_geodesic_distance_to_goal[env_ids_tensor] = geodesic
+            self.reference_turn_cost_to_goal[env_ids_tensor] = turn_cost
+
     def _reset_tracking_state(self, env_ids: Sequence[int]):
         """Reset tracking state for specified environments."""
         self.steps_at_goal[env_ids] = 0
         self.time_at_goal[env_ids] = 0
         self.total_distance_traveled[env_ids] = 0.0
         self.previous_position[env_ids] = self.robot.data.root_pos_w[env_ids].clone()
+        self.total_abs_yaw_change[env_ids] = 0.0
+        self.previous_yaw[env_ids] = math_utils.euler_xyz_from_quat(
+            self.robot.data.root_quat_w[env_ids]
+        )[2]
+        self.first_goal_reach_time[env_ids] = float("nan")
+        self.path_at_first_reach[env_ids] = float("nan")
+        self.yaw_at_first_reach[env_ids] = float("nan")
 
     def _update_command(self):
         """Update command in body frame."""
@@ -599,6 +668,25 @@ class RobotNavigationGoalCommand(CommandTerm):
         self.total_distance_traveled += step_distance
         self.previous_position = self.robot.data.root_pos_w.clone()
 
+        current_yaw = math_utils.euler_xyz_from_quat(self.robot.data.root_quat_w)[2]
+        yaw_delta = math_utils.wrap_to_pi(current_yaw - self.previous_yaw)
+        self.total_abs_yaw_change += torch.abs(yaw_delta)
+        self.previous_yaw = current_yaw
+
+        distance_to_goal_xy = torch.norm(
+            self.robot.data.root_pos_w[:, :2] - self.goal_position_world[:, :2], dim=1
+        )
+        first_reach_mask = (
+            torch.isnan(self.first_goal_reach_time)
+            & (distance_to_goal_xy < self.cfg.metric_goal_distance_threshold)
+        )
+        if first_reach_mask.any():
+            self.first_goal_reach_time[first_reach_mask] = (
+                self.env.episode_length_buf[first_reach_mask].float() * self.env.step_dt
+            )
+            self.path_at_first_reach[first_reach_mask] = self.total_distance_traveled[first_reach_mask]
+            self.yaw_at_first_reach[first_reach_mask] = self.total_abs_yaw_change[first_reach_mask]
+
     def _resample_spawn_positions(self, env_ids: Sequence[int]):
         """Update spawn position tracking."""
         self.spawn_position_world[env_ids, :2] = self.env.scene.env_origins[env_ids, :2]
@@ -617,33 +705,128 @@ class RobotNavigationGoalCommand(CommandTerm):
 
         direction_to_goal = position_error_2d / torch.clamp(torch.norm(position_error_2d, dim=1, keepdim=True), min=1e-6)
         self.metrics["velocity_toward_goal"] = (velocity_2d * direction_to_goal).sum(dim=1)
+        self._update_tracker_metrics()
+
+    def _update_tracker_metrics(self):
+        """Refresh metrics backed by rolling episode trackers."""
         self.metrics["success_rate"] = self.success_tracker.get_success_rate()
+        if self.cfg.track_spl:
+            self.metrics["spl"] = self.spl_tracker.get_mean()
+        if self.cfg.track_sct:
+            for name, tracker in self.sct_trackers.items():
+                self.metrics[name] = tracker.get_mean()
+            self.metrics["time_to_goal"] = self.time_to_goal_tracker.get_mean()
+        if self.cfg.track_turn_efficiency:
+            self.metrics["turn_efficiency"] = self.turn_efficiency_tracker.get_mean()
+            self.metrics["cumulative_yaw"] = self.cumulative_yaw_tracker.get_mean()
+
+    def _record_episode_spl(self, env_ids: torch.Tensor, success: torch.Tensor):
+        """Record SPL = success * l / max(p, l) for the just-finished episodes.
+
+        `l` is the geodesic shortest-path length from the actual reset pose to
+        the goal on the navigable grid.
+        """
+        if not self.cfg.track_spl:
+            return
+
+        l = self.initial_geodesic_distance_to_goal[env_ids]
+        # Use the path length up to first goal reach.
+        snapshot_p = self.path_at_first_reach[env_ids]
+        p = torch.where(torch.isnan(snapshot_p), self.total_distance_traveled[env_ids], snapshot_p)
+        spl = success * l / torch.clamp(torch.maximum(p, l), min=1e-6)
+        self.spl_tracker.record(spl, env_ids)
+
+    def _record_episode_sct(self, env_ids: torch.Tensor, success: torch.Tensor):
+        """Record approximate SCT at each configured reference speed."""
+        if not self.cfg.track_sct:
+            return
+
+        geodesic = self.initial_geodesic_distance_to_goal[env_ids]
+        episode_time = self.env.episode_length_buf[env_ids].float() * self.env.step_dt
+        completion_time = torch.where(
+            torch.isnan(self.first_goal_reach_time[env_ids]),
+            episode_time,
+            self.first_goal_reach_time[env_ids],
+        )
+
+        successful_time = torch.where(success > 0, completion_time, torch.full_like(completion_time, float("nan")))
+        self.time_to_goal_tracker.record(successful_time, env_ids)
+
+        for v_ref in self.cfg.sct_reference_speeds:
+            name = self._sct_metric_name(v_ref)
+            t_ref = geodesic / max(float(v_ref), 1e-6)
+            sct = success * t_ref / torch.clamp(torch.maximum(completion_time, t_ref), min=1e-6)
+            self.sct_trackers[name].record(sct, env_ids)
+
+    def _record_episode_turn_efficiency(self, env_ids: torch.Tensor, success: torch.Tensor):
+        """Record success-weighted turning efficiency and raw cumulative yaw."""
+        if not self.cfg.track_turn_efficiency:
+            return
+
+        theta_ref = self.reference_turn_cost_to_goal[env_ids]
+        # Use the yaw change up to first goal reach so the efficiency ratio
+        # isn't deflated by oscillation during the sustained-presence wait.
+        snapshot_theta = self.yaw_at_first_reach[env_ids]
+        theta = torch.where(torch.isnan(snapshot_theta), self.total_abs_yaw_change[env_ids], snapshot_theta)
+        perfect_straight = (theta_ref <= 1e-6) & (theta <= 1e-6)
+        turn_ratio = theta_ref / torch.clamp(torch.maximum(theta, theta_ref), min=1e-6)
+        turn_efficiency = success * torch.where(perfect_straight, torch.ones_like(turn_ratio), turn_ratio)
+        self.turn_efficiency_tracker.record(turn_efficiency, env_ids)
+
+        successful_yaw = torch.where(success > 0, theta, torch.full_like(theta, float("nan")))
+        self.cumulative_yaw_tracker.record(successful_yaw, env_ids)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
         """Reset command generator and compute episode metrics."""
-        metrics_obs = self.env.observation_manager.compute_group(group_name="metrics")
-        success = metrics_obs["in_goal"][env_ids].squeeze(-1)
-        failed = ~success
+        if env_ids is None:
+            env_ids_tensor = torch.arange(self.num_envs, device=self.device, dtype=torch.long)
+            env_ids_index = slice(None)
+        elif isinstance(env_ids, torch.Tensor):
+            env_ids_tensor = env_ids.to(device=self.device, dtype=torch.long)
+            env_ids_index = env_ids
+        else:
+            env_ids_tensor = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
+            env_ids_index = env_ids
 
-        # Update legacy success rate buffer
-        self.success_rate_buffer[env_ids] = torch.roll(
-            self.success_rate_buffer[env_ids], 1, dims=1
-        )
-        rate = success.float() - failed.float()
-        rate[rate == 0] = -1
-        self.success_rate_buffer[env_ids, 0] = rate
+        # Filter to envs that actually ran an episode; on the very first reset
+        # episode_length_buf is 0 and there is no outcome to record.
+        completed_mask = self.env.episode_length_buf[env_ids_tensor] > 0
+        completed_env_ids = env_ids_tensor[completed_mask]
+
+        if completed_env_ids.numel() > 0:
+            # Record the episode outcome once, at reset time. The episode
+            # counts as successful if the robot reached the goal threshold at
+            # any point before reset. time_at_goal is cleared later by _resample().
+            success = (self.time_at_goal[completed_env_ids] > 0.0).float()
+            self.success_tracker.record_result(success, completed_env_ids)
+
+            if self.cfg.track_spl:
+                self._record_episode_spl(completed_env_ids, success)
+            if self.cfg.track_sct:
+                self._record_episode_sct(completed_env_ids, success)
+            if self.cfg.track_turn_efficiency:
+                self._record_episode_turn_efficiency(completed_env_ids, success)
+
+        # Refresh tracker-backed metrics so reset extras include the
+        # episode that just terminated: success_tracker.record_result()
+        # above writes this episode's outcome AFTER the last compute()
+        # call, so without re-reading here the logged success_rate would
+        # lag by one episode.
+        # Do not call _update_metrics() - it also recomputes velocity from
+        # root_state_w, but reset runs after Isaac Lab has already reset
+        # scene state for these envs, so the read would overwrite the
+        # meaningful last in-episode velocity with reset-state values.
+        self._update_tracker_metrics()
 
         # Reset command state
-        if env_ids is None:
-            env_ids = slice(None)
-        self.command_counter[env_ids] = 0
-        self._resample(env_ids)
+        self.command_counter[env_ids_index] = 0
+        self._resample(env_ids_index)
 
         # Return mean metrics
         extras = {}
         for name, value in self.metrics.items():
-            extras[name] = torch.mean(value[env_ids]).item()
-            value[env_ids] = 0.0
+            extras[name] = torch.mean(value[env_ids_index]).item()
+            value[env_ids_index] = 0.0
 
         return extras
 
@@ -779,7 +962,6 @@ RobotNavigationGoalCommand.time_at_goal_in_steps = property(lambda self: self.st
 RobotNavigationGoalCommand.required_time_at_goal_in_steps = property(
     lambda self: self.required_steps_at_goal
 )
-RobotNavigationGoalCommand.goal_reached_buffer = property(lambda self: self.success_tracker)
 RobotNavigationGoalCommand.goal_reached_counter = property(lambda self: self.goal_reach_count)
 RobotNavigationGoalCommand.distance_traveled = property(lambda self: self.total_distance_traveled)
 RobotNavigationGoalCommand.previous_pos_3d = property(lambda self: self.previous_position)
