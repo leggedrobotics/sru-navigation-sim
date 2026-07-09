@@ -14,6 +14,8 @@ from isaaclab.managers import CommandTermCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg
 from .goal_commands import RobotNavigationGoalCommand
+from .path_generator import GlobalPathConfig
+from .prm import PrmConfig
 
 
 """
@@ -31,4 +33,10 @@ class RobotNavigationGoalCommandCfg(CommandTermCfg):
 
     robot_to_goal_line_vis: bool = True
     """If true, visualize the line from the robot to the goal."""
+
+    path_cfg: GlobalPathConfig = GlobalPathConfig()
+    """Configuration for the global path (PRM + A*) generated from spawn to goal."""
+
+    prm_cfg: PrmConfig = PrmConfig()
+    """Configuration for the per-terrain-tile probabilistic roadmap the path is planned over."""
 

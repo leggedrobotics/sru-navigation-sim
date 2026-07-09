@@ -39,6 +39,9 @@ from isaaclab.utils.math import subtract_frame_transforms, transform_points, yaw
 from isaaclab_nav_task.navigation.mdp.math_utils import vec_to_quat
 from isaaclab_nav_task.terrains.terrain_constants import VERTICAL_SCALE
 
+from .path_generator import MultiPath
+from .prm import MultiPRM
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
     from .goal_commands_cfg import RobotNavigationGoalCommandCfg
@@ -354,6 +357,7 @@ class RobotNavigationGoalCommand(CommandTerm):
         # Position sampling (lazy initialization)
         self._sampling_initialized = False
         self._position_sampler: Optional[PositionSampler] = None
+        self.paths_manager: Optional[MultiPath] = None
 
     def _init_command_buffers(self):
         """Initialize command state buffers."""
@@ -407,6 +411,15 @@ class RobotNavigationGoalCommand(CommandTerm):
 
     def _get_unscaled_command(self) -> torch.Tensor:
         return self.goal_command_body_unscaled
+
+    def get_path(self) -> torch.Tensor:
+        """The current global path for every env, in body frame: `(num_envs, num_smooth_points, 4)`
+        = `(direction_xyz, log_distance)` per waypoint."""
+        return self.paths_manager.get_all_tensors()
+
+    def get_path_metrics(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Distance to path and progress-along-path, both `(num_envs,)` - see `MultiPath.get_all_path_metrics`."""
+        return self.paths_manager.get_all_path_metrics()
 
     # =========================================================================
     # Position Sampling
@@ -469,6 +482,13 @@ class RobotNavigationGoalCommand(CommandTerm):
         )
 
         self._sampling_initialized = True
+
+        # Lazily build the PRM roadmap - one per terrain tile, shared by every env on that tile.
+        # Guarded so a second RobotNavigationGoalCommand instance (there should only ever be one)
+        # doesn't rebuild it.
+        if not hasattr(self.env, "prm_manager"):
+            setattr(self.env, "prm_manager", MultiPRM(self.cfg.prm_cfg, self.env))
+        self.paths_manager = MultiPath(self.num_envs, self.cfg.path_cfg, self.env.prm_manager, self.device)
 
     def _get_terrain_indices(self, env_ids: torch.Tensor) -> torch.Tensor:
         """Get terrain indices for given environment IDs.
@@ -546,6 +566,18 @@ class RobotNavigationGoalCommand(CommandTerm):
         self.spawn_position_world[env_ids, 1] = terrain_origins[:, 1] + spawn_y
         self.spawn_position_world[env_ids, 2] = spawn_z + spawn_offset
 
+        # Rebuild the global path for these environments: spawn -> goal, on their terrain tile's PRM.
+        # Indexing with env_ids_tensor (not the raw env_ids parameter) since MultiPath.rebuild needs
+        # a real, enumerable tensor of indices (env_ids here may be a slice, e.g. slice(None) on a
+        # full reset).
+        self.paths_manager.rebuild(
+            self.cfg.path_cfg,
+            starts=self.spawn_position_world[env_ids_tensor, :2],
+            goals=self.goal_position_world[env_ids_tensor, :2],
+            tile_ids=terrain_indices,
+            env_ids=env_ids_tensor,
+        )
+
         # Initialize distance metrics
         self.initial_distance_to_goal[env_ids] = torch.norm(
             self.robot.data.root_pos_w[env_ids] - self.goal_position_world[env_ids], dim=1
@@ -581,6 +613,12 @@ class RobotNavigationGoalCommand(CommandTerm):
 
         self.goal_command_body[:, :3] = direction
         self.goal_command_body[:, 3:] = log_distance
+
+        # Update the global path into the current body frame (runs every step; the path itself is
+        # only rebuilt on episode reset, in _resample_command).
+        self.paths_manager.update(
+            inverse_pos, inverse_rot, self.robot.data.root_pos_w, self.robot.data.root_quat_w
+        )
 
         self._update_distance_tracking()
 
