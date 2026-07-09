@@ -489,6 +489,28 @@ def in_goal(
     return distance_goal < distance_threshold
 
 
+def generated_path_reshaped(
+    env: ManagerBasedRLEnv, command_name: str = "robot_goal", flatten: bool = False
+) -> torch.Tensor:
+    """The global path (PRM + A*, spawn to goal) from the goal command term, in body frame.
+
+    Args:
+        env: The learning environment.
+        command_name: The name of the goal command.
+        flatten: Whether to flatten the per-waypoint (direction_xyz, log_distance) path into a
+            single vector.
+
+    Returns:
+        The path tensor: `(num_envs, num_smooth_points, 4)`, or `(num_envs, num_smooth_points * 4)`
+        if flattened.
+    """
+    goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms[command_name]
+    path = goal_cmd_generator.get_path()
+    if flatten:
+        return path.flatten(start_dim=1)
+    return path
+
+
 def time_normalized(env: ManagerBasedRLEnv, command_name: str = "robot_goal") -> torch.Tensor:
     """Time normalized to the maximum episode length.
 
