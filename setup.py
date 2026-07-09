@@ -30,6 +30,9 @@ INSTALL_REQUIRES = [
     "h5py",
     # visualization
     "tensorboard",
+    # path planning (PRM roadmap: k-NN graph construction and Bresenham traversability checks)
+    "scipy",
+    "scikit-image",
 ]
 
 PYTORCH_INDEX_URL = ["https://download.pytorch.org/whl/cu128"]
