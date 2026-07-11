@@ -1,9 +1,11 @@
-# IsaacLab Navigation Extension - SRU Project
+# IsaacLab Navigation Extension - SRU Project (Path-Conditioned)
 
 [![Paper](https://img.shields.io/badge/IJRR-2025-blue)](https://journals.sagepub.com/home/ijr)
 [![Website](https://img.shields.io/badge/Project-Website-green)](https://michaelfyang.github.io/sru-project-website/)
 
 > **📌 Important Note**: This repository contains the **IsaacLab task extension** for the SRU project, providing diverse navigation environments with dynamic obstacle configurations and terrain variations. This repository does **not** include the `rsl_rl` learning module (network architectures, PPO/MDPO training algorithms). See the [project website](https://michaelfyang.github.io/sru-project-website/) for the complete navigation system.
+
+> **🧭 Path-Conditioning Fork**: This fork extends the base extension with **path-conditioned navigation** - a global path from spawn to goal (planned over a per-terrain-tile probabilistic roadmap with A*) is computed each episode and fed to the policy as an additional observation, alongside a dense progress-along-path reward. See [Path Conditioning](#path-conditioning) below for details.
 
 ## Overview
 
@@ -32,6 +34,7 @@ The extension is fully self-contained with all necessary robot models, materials
 - ✅ Hierarchical action interface: SE2 velocity commands to low-level controllers
 - ✅ Domain randomization: Camera pose, action scaling, low-pass filters, sensor delays
 - ✅ Training scripts compatible with RSL-RL (PPO/MDPO algorithms)
+- ✅ Path-conditioned navigation: per-tile PRM + A* global path planning, path observations, progress reward (see [Path Conditioning](#path-conditioning))
 
 ### What's NOT Included
 
@@ -58,6 +61,7 @@ The extension is fully self-contained with all necessary robot models, materials
 - **Curriculum learning** for terrain difficulty progression
 - **Multiple algorithms**: MDPO and PPO support via RSL-RL
 - **Domain randomization**: Camera pose, action scaling, low-pass filters, sensor delays
+- **Path-conditioned navigation**: per-episode global path (PRM + A*) from spawn to goal, exposed to the policy as an observation with a dedicated progress reward
 
 ## Installation
 
@@ -259,6 +263,8 @@ isaaclab_nav_task/
         │   └── navigation/
         │       ├── goal_commands.py
         │       ├── goal_commands_cfg.py
+        │       ├── prm.py                # PRM roadmap (path-conditioning)
+        │       ├── path_generator.py     # A* + path-category sampling (path-conditioning)
         │       └── actions/
         │           ├── __init__.py
         │           ├── navigation_se2_actions.py
@@ -364,6 +370,56 @@ Robot configuration modules define robot-specific parameters:
 - Uses local robot model when not available in base assets
 
 Both configurations integrate seamlessly with the hierarchical navigation controller and pre-trained locomotion policies.
+
+## Path Conditioning
+
+In addition to the final goal position, the policy can be conditioned on a **global path** from spawn
+to goal, planned once per episode over a per-terrain-tile probabilistic roadmap. This gives the policy
+a mid-horizon route to follow through the maze, rather than only a straight-line direction to the goal.
+
+### Pipeline
+
+1. **PRM roadmap** (`mdp/navigation/prm.py`) - one probabilistic roadmap is built per terrain tile from
+   its height field: `N` points are sampled from free (non-wall/pit) space and connected to their `k`
+   nearest traversable neighbors (Bresenham line-of-sight + height-diff checks), with a configurable
+   dilation margin around height "cliffs".
+2. **Global path generation** (`mdp/navigation/path_generator.py`) - each episode, the spawn and goal
+   positions are inserted into the roadmap and a path between them is planned per a sampled **path
+   category** (see table below), then simplified via line-of-sight smoothing and resampled to a fixed
+   number of waypoints.
+3. **Goal command integration** (`mdp/navigation/goal_commands.py`) - `RobotNavigationGoalCommand`
+   builds the PRM roadmaps once per environment instance, rebuilds each env's path on episode reset,
+   and updates all paths into the robot's current body frame every step.
+4. **Observation & reward** (`mdp/observations.py`, `mdp/rewards.py`, `mdp/custom_noise.py`) - the path
+   is exposed to the policy as a `target_path` observation (direction + log-distance per waypoint, with
+   a batched delta-rotation/translation noise model), and a `progress_along_path` reward gives dense
+   credit for making forward progress along it.
+
+### Path Categories
+
+Each episode's path is sampled from one of four categories (`GlobalPathConfig.path_categories`/
+`category_weights`), which differ in search algorithm, heuristic, smoothing, and noise:
+
+| Path category | Search algorithm | Heuristic | Smoothing | Noise |
+|---|---|---|---|---|
+| `optimal` | A* (real) | true Euclidean distance | `smooth_path_los` (aggressive - jumps as far ahead as line-of-sight allows) | none |
+| `mildly_non_optimal` | Greedy best-first search | blend biased toward a random waypoint | `smooth_path_los` (aggressive) | none |
+| `highly_non_optimal` | Greedy best-first search | blend biased toward a random waypoint | `smooth_path_los_for_non_optimal` (conservative - advances one point at a time) | none |
+| `infeasible` | Greedy best-first search | blend biased toward a random waypoint | `smooth_path_los_for_non_optimal` (conservative) | uniform 2D radial noise per waypoint |
+
+Notes:
+- Only `optimal` uses true A* - `astar()`'s edge cost is never accumulated when `optimal=False`, so the
+  other three categories are actually greedy best-first search (GBFS), biased toward a single randomly
+  sampled PRM waypoint via a blended heuristic (`0.1 * true_distance + 0.9 * distance_to_waypoint`).
+- The two smoothing variants trade off directness vs. faithfulness to the raw search path:
+  `smooth_path_los` jumps as far ahead as line-of-sight allows (straightens aggressively), while
+  `smooth_path_los_for_non_optimal` advances one waypoint at a time (preserves more of a winding route).
+- `infeasible` paths get additional per-waypoint noise (`add_noise_to_path`) sampled uniformly within a
+  disk of radius `GlobalPathConfig.add_noise` - independent of the observation-level path noise applied
+  by `custom_noise.delta_transform_path_noise` (a single correlated rotation+translation over the whole
+  path, applied as part of the `target_path` observation).
+- The default `category_weights = [0, 0, 0.5, 0.5]` only samples `highly_non_optimal`/`infeasible` paths
+  50/50 - override this in `GlobalPathConfig` to include `optimal`/`mildly_non_optimal` paths.
 
 ## Docker and Cluster Setup
 
