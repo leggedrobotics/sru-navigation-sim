@@ -413,7 +413,15 @@ class GlobalPath:
         return beta * true_distance + (1 - beta) * distance_waypoint
 
     def astar(self, start: int, goal: int, optimal: bool = True) -> np.ndarray:
-        """A* search over the PRM roadmap, returning the path as an array of height-map coordinates."""
+        """A* search over the PRM roadmap, returning the path as an array of height-map coordinates.
+
+        When `optimal=False`, this isn't really A* despite the `g_score`/`f_score` naming: edge costs
+        are never accumulated into `tentative_g` (see below), so the search degenerates to greedy
+        best-first search (GBFS), biased towards `self.waypoints[0]` via `euclidean`'s non-optimal
+        heuristic. That's deliberate - it's what produces the intentionally suboptimal/meandering
+        paths for the non-"optimal" path categories - but worth knowing before assuming `g_score`
+        here means real path cost.
+        """
         num_nodes = self.prm.nodes.shape[0]
 
         if not hasattr(self, "_came_from") or self._came_from.shape[0] != num_nodes:
@@ -456,6 +464,9 @@ class GlobalPath:
                 tentative_g = g_score[current]
                 if optimal:
                     tentative_g += self.euclidean(self.prm.nodes[current], self.prm.nodes[neighbor])
+                # else: no edge cost added - g_score stays 0 along the frontier, so ordering is driven
+                # purely by f_score's (biased) heuristic below. This is what makes optimal=False GBFS,
+                # not A* - see the docstring.
 
                 if tentative_g < g_score[neighbor]:
                     came_from[neighbor] = current
