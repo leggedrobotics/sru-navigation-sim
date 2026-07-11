@@ -119,6 +119,12 @@ class MultiPath:
         if starts.shape[1] != 2 or goals.shape[1] != 2:
             raise RuntimeError("starts and goals must be of shape (k, 2) representing world-frame (x, y).")
 
+        if cfg_path.num_smooth_points != self.size_path:
+            raise RuntimeError(
+                f"cfg_path.num_smooth_points ({cfg_path.num_smooth_points}) must match "
+                f"MultiPath.size_path ({self.size_path})."
+            )
+
         for i, env_id in enumerate(env_ids):
             prm = self.prm_manager.get(int(tile_ids[i]))
             self.paths[env_id].prm = prm
