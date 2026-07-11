@@ -172,9 +172,11 @@ class Prm:
         """Mark cells near a height "cliff" (large height jump between neighbors) as non-traversable.
 
         This is a PRM-local traversability margin, distinct from the terrain generator's own
-        goal/spawn safety padding (`terrain_constants.PADDING`).
+        goal/spawn safety padding (`terrain_constants.PADDING`). Uses the same threshold as
+        `is_traversable`'s straight-line height-diff check (`cfg.max_height_diff`) so the two stay
+        consistent when a caller tunes it.
         """
-        cliff_height_threshold = 50
+        cliff_height_threshold = self.cfg.max_height_diff
 
         h = self.height_map
         cliff_mask = torch.zeros_like(h, dtype=torch.bool)
@@ -196,10 +198,12 @@ class Prm:
     def sample_free_point(self) -> tuple[int, int, int]:
         """Randomly sample a non-padded point from the height map, returning (x, y, height)."""
         max_attempts = 10000
+        # `x`/`y` index `height_map`/`padding_mask` directly (`height_map[x, y]`), so their ranges
+        # must match those tensors' own axis sizes - not swapped, or this breaks for non-square tiles.
         rows, cols = self.height_map.shape
         for _ in range(max_attempts):
-            x = random.randint(0, cols - 1)
-            y = random.randint(0, rows - 1)
+            x = random.randint(0, rows - 1)
+            y = random.randint(0, cols - 1)
             if not self.padding_mask[x, y]:
                 return (x, y, int(self.height_map[x, y]))
         raise RuntimeError(f"Could not sample free point after {max_attempts} attempts. Check height map and padding settings.")
