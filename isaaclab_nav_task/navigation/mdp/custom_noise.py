@@ -123,17 +123,29 @@ def path_xyz_to_goal(xyz: torch.Tensor) -> torch.Tensor:
     return torch.cat([direction, distance], dim=-1)
 
 
+_PATH_WAYPOINT_DIM = 4  # (direction_x, direction_y, direction_z, log_distance) per waypoint - see
+# GlobalPathConfig.num_smooth_points for the waypoint *count*, which this derives at call time
+# instead of hardcoding, so it stays correct if that config value ever changes.
+
+
 @torch.inference_mode()
 def delta_transform_path_noise(data: torch.Tensor, cfg: "DeltaTransformPathNoiseCfg") -> torch.Tensor:
-    """Delta transformation noise for a path observation (15 waypoints x (direction, log distance)).
+    """Delta transformation noise for a flattened path observation (num_waypoints x (direction, log distance)).
 
     Applies the same small random rotation + translation to every waypoint of a given path (not an
-    independent perturbation per waypoint), so the noisy path stays internally consistent.
+    independent perturbation per waypoint), so the noisy path stays internally consistent. The number
+    of waypoints is derived from `data`'s shape (see `GlobalPathConfig.num_smooth_points`) rather than
+    hardcoded, so this doesn't silently drift out of sync if that config value changes.
     """
-    if data.shape[-1] != 60:
-        raise ValueError("Path data must be of shape (..., 60) representing 15 waypoints in (x, y, z, log_dist) format.")
+    if data.shape[-1] % _PATH_WAYPOINT_DIM != 0:
+        raise ValueError(
+            f"Path data's last dim ({data.shape[-1]}) must be a multiple of {_PATH_WAYPOINT_DIM} "
+            "(direction_xyz + log_distance per waypoint) - check that GlobalPathConfig.num_smooth_points "
+            "matches the flattened `target_path` observation this noise is applied to."
+        )
+    num_waypoints = data.shape[-1] // _PATH_WAYPOINT_DIM
 
-    data = data.view(-1, 15, 4)
+    data = data.view(-1, num_waypoints, _PATH_WAYPOINT_DIM)
     coordinate = path_goal_to_xyz(data)
 
     rotation_noise = torch.empty((data.shape[0], 3), device=data.device).uniform_(-cfg.rotation, cfg.rotation)
@@ -150,7 +162,7 @@ def delta_transform_path_noise(data: torch.Tensor, cfg: "DeltaTransformPathNoise
     if cfg.remove_dist:
         output[..., 3:] = 0
 
-    return output.view(-1, 60)
+    return output.view(-1, num_waypoints * _PATH_WAYPOINT_DIM)
 
 
 @configclass
