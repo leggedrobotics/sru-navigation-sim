@@ -249,6 +249,14 @@ class MultiPath:
     def get_all_path_metrics(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Vectorized distance-to-path and progress-along-path, across all environments.
 
+        **Not idempotent - call at most once per sim step.** This isn't a pure query: it mutates
+        `self.last_best_progress` as it computes "progress since last call," so `progress` is only
+        meaningful relative to whenever this was last called. Calling it twice in the same step (e.g.
+        once from a reward term and again from an observation/logging term) will silently zero out
+        `progress` for the second caller, since the delta was already consumed by the first. If more
+        than one consumer needs these metrics in the same step, cache the result of a single call and
+        share it, rather than calling this more than once.
+
         Returns:
             dists: distance from the robot to the closest point on its path, `(num_envs,)`.
             progress: positive progress made since the last call (0 if none, or on regression), `(num_envs,)`.
