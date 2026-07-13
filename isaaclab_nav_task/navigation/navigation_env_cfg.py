@@ -31,7 +31,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import isaaclab_nav_task.navigation.mdp as mdp
-from isaaclab_nav_task.navigation.mdp.custom_noise import DeltaTransformationNoiseCfg
+from isaaclab_nav_task.navigation.mdp.custom_noise import DeltaTransformationNoiseCfg, DeltaTransformPathNoiseCfg
 from isaaclab_nav_task.navigation.mdp.delay_manager import ObservationDelayManagerCfg
 from isaaclab_nav_task.navigation.assets import ISAACLAB_NAV_TASKS_ASSETS_DIR
 
@@ -189,6 +189,11 @@ class ObservationsCfg:
             params={"command_name": "robot_goal", "flatten": True},
             noise=DeltaTransformationNoiseCfg(rotation=0.1, translation=0.5, noise_prob=0.1, remove_dist=False),
         )
+        target_path = ObsTerm(
+            func=mdp.generated_path_reshaped,
+            params={"command_name": "robot_goal", "flatten": True},
+            noise=DeltaTransformPathNoiseCfg(rotation=0.1, translation=0.5, noise_prob=0.1, remove_dist=False),
+        )
         depth_image = ObsTerm(
             func=mdp.depth_image_noisy_delayed, params={"sensor_cfg": SceneEntityCfg("raycast_camera")}
         )
@@ -207,6 +212,9 @@ class ObservationsCfg:
         last_action = ObsTerm(func=mdp.last_action)
         target_position = ObsTerm(
             func=mdp.generated_commands_reshaped, params={"command_name": "robot_goal", "flatten": True}
+        )
+        target_path = ObsTerm(
+            func=mdp.generated_path_reshaped, params={"command_name": "robot_goal", "flatten": True}
         )
         time_normalized = ObsTerm(func=mdp.time_normalized, params={"command_name": "robot_goal"})
         height_scan_critic = ObsTerm(
@@ -361,6 +369,9 @@ class RewardsCfg:
         func=mdp.reach_goal_xyz,
         weight=1.5,
         params={"command_name": "robot_goal", "sigmoid": 0.25, "T_r": 0.1, "probability": 0.01, "flat": True, "ratio": False},
+    )
+    progress_along_path = RewTerm(
+        func=mdp.progress_along_path, weight=0.05, params={"command_name": "robot_goal", "probability": 0.95}
     )
 
     # Backward movement penalty (disabled by default, can be enabled via curriculum)

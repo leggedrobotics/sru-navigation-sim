@@ -116,6 +116,25 @@ def reach_goal_xyz(
     return reward
 
 
+def progress_along_path(env: ManagerBasedRLEnv, command_name: str, probability: float) -> torch.Tensor:
+    """Reward progress made along the global path (PRM + A*, spawn to goal) since the last check.
+
+    Args:
+        env: The learning environment.
+        command_name: Name of the goal command.
+        probability: Probability of applying the reward this step (same random-masking pattern as
+            the other goal rewards, so it isn't applied identically on every single step).
+
+    Returns:
+        Dense reward proportional to newly-made progress along the path (0 if no progress, or on a
+        regression back towards the start - see `MultiPath.get_all_path_metrics`).
+    """
+    goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms[command_name]
+    _, progress = goal_cmd_generator.get_path_metrics()
+    random_mask = (torch.rand(env.num_envs, device=env.device) < probability).float()
+    return progress * random_mask
+
+
 def backward_movement_penalty(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     """Small penalty for backward movement as a regularization term.
 

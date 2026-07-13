@@ -104,3 +104,78 @@ class DeltaTransformationNoiseCfg(NoiseCfg):
     """The probability of applying the noise. Defaults to 0.25."""
     remove_dist: bool = False
     """Whether to remove the distance from the output. Defaults to False."""
+
+
+@torch.jit.script
+def path_goal_to_xyz(goal: torch.Tensor) -> torch.Tensor:
+    """Convert a path in (direction, log distance) format to (x, y, z) coordinates, per waypoint."""
+    direction = goal[:, :, :3]
+    distance = torch.exp(goal[:, :, 3]) - 1
+    return direction * distance.unsqueeze(-1)
+
+
+@torch.jit.script
+def path_xyz_to_goal(xyz: torch.Tensor) -> torch.Tensor:
+    """Convert a path of (x, y, z) coordinates to (direction, log distance) format, per waypoint."""
+    distance = torch.norm(xyz, dim=-1, keepdim=True) + 1e-6
+    direction = xyz / distance
+    distance = torch.log(1 + distance)
+    return torch.cat([direction, distance], dim=-1)
+
+
+_PATH_WAYPOINT_DIM = 4  # (direction_x, direction_y, direction_z, log_distance) per waypoint - see
+# GlobalPathConfig.num_smooth_points for the waypoint *count*, which this derives at call time
+# instead of hardcoding, so it stays correct if that config value ever changes.
+
+
+@torch.inference_mode()
+def delta_transform_path_noise(data: torch.Tensor, cfg: "DeltaTransformPathNoiseCfg") -> torch.Tensor:
+    """Delta transformation noise for a flattened path observation (num_waypoints x (direction, log distance)).
+
+    Applies the same small random rotation + translation to every waypoint of a given path (not an
+    independent perturbation per waypoint), so the noisy path stays internally consistent. The number
+    of waypoints is derived from `data`'s shape (see `GlobalPathConfig.num_smooth_points`) rather than
+    hardcoded, so this doesn't silently drift out of sync if that config value changes.
+    """
+    if data.shape[-1] % _PATH_WAYPOINT_DIM != 0:
+        raise ValueError(
+            f"Path data's last dim ({data.shape[-1]}) must be a multiple of {_PATH_WAYPOINT_DIM} "
+            "(direction_xyz + log_distance per waypoint) - check that GlobalPathConfig.num_smooth_points "
+            "matches the flattened `target_path` observation this noise is applied to."
+        )
+    num_waypoints = data.shape[-1] // _PATH_WAYPOINT_DIM
+
+    data = data.view(-1, num_waypoints, _PATH_WAYPOINT_DIM)
+    coordinate = path_goal_to_xyz(data)
+
+    rotation_noise = torch.empty((data.shape[0], 3), device=data.device).uniform_(-cfg.rotation, cfg.rotation)
+    quat_noise = quat_from_euler_xyz(rotation_noise[:, 0], rotation_noise[:, 1], rotation_noise[:, 2])
+
+    translation_noise = torch.empty((data.shape[0], 3), device=data.device).uniform_(-cfg.translation, cfg.translation)
+
+    transformed_data = transform_points(coordinate, translation_noise, quat_noise)
+    transformed_data = path_xyz_to_goal(transformed_data)
+
+    random_mask = (torch.rand(data.shape[0], device=data.device) < cfg.noise_prob)[:, None, None]
+    output = torch.where(random_mask, transformed_data, data)
+
+    if cfg.remove_dist:
+        output[..., 3:] = 0
+
+    return output.view(-1, num_waypoints * _PATH_WAYPOINT_DIM)
+
+
+@configclass
+class DeltaTransformPathNoiseCfg(NoiseCfg):
+    """Configuration for small delta transformation noise applied to a path observation."""
+
+    func = delta_transform_path_noise
+
+    rotation: float = 0.1
+    """The maximum rotation angle in radians. Defaults to 0.1."""
+    translation: float = 0.5
+    """The maximum translation in meters. Defaults to 0.5."""
+    noise_prob: float = 0.25
+    """The probability of applying the noise. Defaults to 0.25."""
+    remove_dist: bool = False
+    """Whether to remove the distance from the output. Defaults to False."""
