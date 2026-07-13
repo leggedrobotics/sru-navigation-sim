@@ -412,14 +412,27 @@ class RobotNavigationGoalCommand(CommandTerm):
     def _get_unscaled_command(self) -> torch.Tensor:
         return self.goal_command_body_unscaled
 
+    def _require_paths_manager(self) -> MultiPath:
+        """`self.paths_manager` is only built lazily on the first `_resample_command`/reset call
+        (see `_initialize_position_sampling`). Guard path accessors with this so a call before the
+        first reset raises a clear error instead of an opaque `AttributeError` on `None`."""
+        if self.paths_manager is None:
+            raise RuntimeError(
+                "RobotNavigationGoalCommand.get_path()/get_path_metrics() called before the first "
+                "reset - self.paths_manager is only built lazily inside _initialize_position_sampling, "
+                "triggered by the first _resample_command/reset call. Ensure the environment has been "
+                "reset at least once before reading path observations/rewards."
+            )
+        return self.paths_manager
+
     def get_path(self) -> torch.Tensor:
         """The current global path for every env, in body frame: `(num_envs, num_smooth_points, 4)`
         = `(direction_xyz, log_distance)` per waypoint."""
-        return self.paths_manager.get_all_tensors()
+        return self._require_paths_manager().get_all_tensors()
 
     def get_path_metrics(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Distance to path and progress-along-path, both `(num_envs,)` - see `MultiPath.get_all_path_metrics`."""
-        return self.paths_manager.get_all_path_metrics()
+        return self._require_paths_manager().get_all_path_metrics()
 
     # =========================================================================
     # Position Sampling
