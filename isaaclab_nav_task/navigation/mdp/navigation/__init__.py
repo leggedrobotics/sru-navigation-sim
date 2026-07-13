@@ -5,6 +5,7 @@
 
 """Navigation-specific MDP components including goal commands and SE2 actions."""
 
+from .prm import *  # noqa: F401, F403
 from .goal_commands import *  # noqa: F401, F403
 from .goal_commands_cfg import *  # noqa: F401, F403
 from .actions import *  # noqa: F401, F403
