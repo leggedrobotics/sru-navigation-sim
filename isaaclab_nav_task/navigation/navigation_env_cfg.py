@@ -314,6 +314,12 @@ class EventCfg:
         mode="reset",
     )
 
+    reset_low_pass_filter = EventTerm(
+        func=mdp.reset_low_pass_filter,
+        mode="reset",
+        params={"action_term": "velocity_command"},
+    )
+
     randomize_low_pass_filter_alpha = EventTerm(
         func=mdp.randomize_low_pass_filter_alpha,
         mode="reset",
