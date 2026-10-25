@@ -14,7 +14,6 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor
 from isaaclab.utils.math import quat_inv, yaw_quat, quat_mul, euler_xyz_from_quat
@@ -46,28 +45,17 @@ def time_out_navigation(
     goal_cmd_name: str = "robot_goal",
     distance_threshold: float = 0.5
 ) -> torch.Tensor:
-    """Terminate the episode when the episode length exceeds the maximum episode length.
-
-    This also tracks success metrics by checking if the robot reached the goal before timeout.
-    """
+    """Terminate the episode when the episode length exceeds the maximum episode length."""
     from isaaclab_nav_task.navigation.mdp.navigation.goal_commands import RobotNavigationGoalCommand
 
     goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms[goal_cmd_name]
 
     termination = env.episode_length_buf >= env.max_episode_length
 
-    env_ids = torch.where(termination)[0]
-
     distance_goal = torch.norm(goal_cmd_generator._get_unscaled_command()[:, :2], dim=1)
 
     # update time at goal
     goal_cmd_generator.time_at_goal[distance_goal < distance_threshold] += 1 * env.step_dt
-
-    if env_ids.numel() > 0:  # Check if env_ids is not empty
-        success_masks = goal_cmd_generator.time_at_goal > 0.0
-        value_buffer = torch.zeros_like(distance_goal)  # init with 0: Fail
-        value_buffer[success_masks] = 1.0  # Success
-        goal_cmd_generator.goal_reached_buffer.add(value_buffer, env_ids)
 
     return termination
 
@@ -79,21 +67,13 @@ def illegal_contact_navigation(
     goal_cmd_name: str = "robot_goal",
 ) -> torch.Tensor:
     """Terminate when the contact force on the sensor exceeds the force threshold."""
-    from isaaclab_nav_task.navigation.mdp.navigation.goal_commands import RobotNavigationGoalCommand
-
     # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     net_contact_forces = contact_sensor.data.net_forces_w_history
-    goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms[goal_cmd_name]
 
     termination = torch.any(
         torch.max(torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1), dim=1)[0] > threshold, dim=1
     )
-
-    env_ids = torch.where(termination)[0]
-
-    if env_ids.numel() > 0:  # Check if env_ids is not empty
-        goal_cmd_generator.goal_reached_buffer.add(torch.zeros_like(termination, dtype=torch.float), env_ids)
 
     return termination
 
@@ -104,10 +84,6 @@ def large_angle_termination_navigation(
     goal_cmd_name: str = "robot_goal",
 ) -> torch.Tensor:
     """Terminate when the robot exceeds a pitch or roll angle threshold."""
-    from isaaclab_nav_task.navigation.mdp.navigation.goal_commands import RobotNavigationGoalCommand
-
-    goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms[goal_cmd_name]
-
     # degree to rad
     threshold_rad = threshold * torch.pi / 180.0
 
@@ -117,11 +93,6 @@ def large_angle_termination_navigation(
     robot_roll, robot_pitch, _ = euler_xyz_from_quat_wrapped(base_quat_b)
 
     termination = torch.logical_or(torch.abs(robot_pitch) > threshold_rad, torch.abs(robot_roll) > threshold_rad)
-
-    env_ids = torch.where(termination)[0]
-
-    if env_ids.numel() > 0:  # Check if env_ids is not empty
-        goal_cmd_generator.goal_reached_buffer.add(torch.zeros_like(termination, dtype=torch.float), env_ids)
 
     return termination
 
@@ -145,8 +116,6 @@ def at_goal_navigation(
     """
     from isaaclab_nav_task.navigation.mdp.navigation.goal_commands import RobotNavigationGoalCommand
 
-    # Extract the used quantities
-    asset: Articulation = env.scene[asset_cfg.name]
     goal_cmd_generator: RobotNavigationGoalCommand = env.command_manager._terms.get(goal_cmd_name)
 
     # Calculate distance to goal
@@ -164,11 +133,6 @@ def at_goal_navigation(
 
     # Determine if termination condition is met
     termination = goal_cmd_generator.time_at_goal_in_steps > goal_cmd_generator.required_time_at_goal_in_steps
-
-    # Update goal reached buffer if termination condition is met
-    env_ids = torch.where(termination)[0]
-    if env_ids.numel() > 0:  # Check if any environments have met the termination condition
-        goal_cmd_generator.goal_reached_buffer.add(torch.ones_like(termination, dtype=torch.float), env_ids)
 
     return termination
 
@@ -201,11 +165,5 @@ def terrain_fall(
     # Early exit if no terminations (common case - avoids torch.where overhead)
     if not termination.any():
         return termination
-
-    # Update goal reached buffer with failure
-    goal_cmd = env.command_manager._terms.get(goal_cmd_name)
-    if goal_cmd is not None:
-        env_ids = termination.nonzero(as_tuple=False).squeeze(-1)
-        goal_cmd.goal_reached_buffer.add(torch.zeros(env.num_envs, dtype=torch.float, device=env.device), env_ids)
 
     return termination
